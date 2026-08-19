@@ -19,7 +19,6 @@
             position: fixed;
         }
 
-        /* La vidéo de la caméra sert de fond, bien VISIBLE */
         #video {
             position: fixed;
             top: 0;
@@ -27,11 +26,9 @@
             width: 100%;
             height: 100%;
             object-fit: cover;
-            transform: scaleX(-1); /* effet miroir, plus naturel */
             z-index: 1;
         }
 
-        /* Le canvas 3D et le canvas de détection sont par-dessus, transparents */
         #canvas3d, #canvasHands {
             position: fixed;
             top: 0;
@@ -80,7 +77,7 @@
             font-size: 12px;
             border: 2px solid #00ff00;
             z-index: 100;
-            max-width: 150px;
+            max-width: 160px;
         }
 
         .status div { margin: 3px 0; }
@@ -111,9 +108,9 @@
     <canvas id="canvasHands"></canvas>
 
     <div class="controls">
-        <button class="button" id="btnCam" onclick="toggleCamera()">📷 CAM</button>
-        <button class="button" id="btnHands" onclick="toggleHands()">🖐️ MAIN</button>
-        <button class="button" id="btnGyro" onclick="toggleGyro()">🎯 GYRO</button>
+        <button class="button" id="btnCam" onclick="window.toggleCamera()">📷 CAM</button>
+        <button class="button" id="btnHands" onclick="window.toggleHands()">🖐️ MAIN</button>
+        <button class="button" id="btnGyro" onclick="window.toggleGyro()">🎯 GYRO</button>
     </div>
 
     <div class="status">
@@ -127,7 +124,9 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
-    <script>
+    <script type="module">
+        import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
         let scene, camera3d, renderer;
         let cameraActive = false;
         let gyroActive = false;
@@ -135,36 +134,34 @@
         let rotationX = 0, rotationY = 0;
         let videoStream = null;
         let handLoopId = null;
+        let handLandmarker = null;
+        let handLandmarkerReady = false;
 
         function debug(msg) {
             const d = document.getElementById('debug');
             const time = new Date().toLocaleTimeString();
-            d.innerHTML = `[${time}] ${msg}<br>` + d.innerHTML.slice(0, 500);
+            d.innerHTML = `[${time}] ${msg}<br>` + d.innerHTML.slice(0, 600);
             console.log(msg);
         }
 
-        // ---------- THREE.JS (les cubes 3D) ----------
+        // ---------- THREE.JS ----------
         function initThree() {
             const canvas = document.getElementById('canvas3d');
             const w = window.innerWidth;
             const h = window.innerHeight;
 
             scene = new THREE.Scene();
-
             camera3d = new THREE.PerspectiveCamera(75, w / h, 0.1, 1000);
             camera3d.position.z = 5;
 
-            renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
+            renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
             renderer.setSize(w, h);
             renderer.setPixelRatio(window.devicePixelRatio);
 
             const geometry = new THREE.BoxGeometry(1, 1, 1);
             const material = new THREE.MeshPhongMaterial({
-                color: 0x00ff00,
-                emissive: 0x00ff00,
-                emissiveIntensity: 0.4,
-                transparent: true,
-                opacity: 0.85
+                color: 0x00ff00, emissive: 0x00ff00, emissiveIntensity: 0.4,
+                transparent: true, opacity: 0.75
             });
 
             for (let i = 0; i < 5; i++) {
@@ -180,18 +177,15 @@
 
             window.addEventListener('resize', onResize);
             onResize();
-
             animate();
-            debug('✅ Three.js prêt, ' + w + 'x' + h);
+            debug('✅ Three.js prêt');
         }
 
         function onResize() {
-            const w = window.innerWidth;
-            const h = window.innerHeight;
+            const w = window.innerWidth, h = window.innerHeight;
             camera3d.aspect = w / h;
             camera3d.updateProjectionMatrix();
             renderer.setSize(w, h);
-
             const ch = document.getElementById('canvasHands');
             ch.width = w;
             ch.height = h;
@@ -211,22 +205,15 @@
         // ---------- GYROSCOPE ----------
         function toggleGyro() {
             if (!gyroActive) {
-                // iOS 13+ demande une permission explicite au clic du bouton
                 if (typeof DeviceOrientationEvent !== 'undefined' &&
                     typeof DeviceOrientationEvent.requestPermission === 'function') {
                     DeviceOrientationEvent.requestPermission()
-                        .then(state => {
-                            if (state === 'granted') {
-                                enableGyro();
-                            } else {
-                                debug('❌ Permission gyroscope refusée');
-                            }
-                        })
+                        .then(state => state === 'granted' ? enableGyro() : debug('❌ Permission gyro refusée'))
                         .catch(err => debug('❌ Erreur permission gyro: ' + err.message));
                 } else if (typeof DeviceOrientationEvent !== 'undefined') {
                     enableGyro();
                 } else {
-                    debug('❌ Gyroscope non supporté sur cet appareil/navigateur');
+                    debug('❌ Gyroscope non supporté');
                 }
             } else {
                 window.removeEventListener('deviceorientation', handleOrientation);
@@ -250,39 +237,90 @@
                 `X:${Math.round(rotationX)} Y:${Math.round(rotationY)}`;
         }
 
-        // ---------- CAMERA ----------
-        function toggleCamera() {
-            if (!cameraActive) startCamera();
+        // ---------- CAMERA (arrière + ultra grand-angle) ----------
+        async function toggleCamera() {
+            if (!cameraActive) await startCamera();
             else stopCamera();
+        }
+
+        async function findBestBackCamera() {
+            // Il faut d'abord une permission pour voir les vrais noms des caméras
+            try {
+                const tmp = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                tmp.getTracks().forEach(t => t.stop());
+            } catch (e) {
+                debug('⚠️ Pré-permission échouée: ' + e.message);
+            }
+
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoInputs = devices.filter(d => d.kind === 'videoinput');
+            debug('Caméras: ' + videoInputs.map(d => d.label || '(sans nom)').join(' | '));
+
+            const keywords = ['ultra wide', 'ultra-wide', 'ultrawide', '0.5x', '0.5', 'back ultra'];
+            let best = videoInputs.find(d => keywords.some(k => d.label.toLowerCase().includes(k)));
+
+            if (!best) {
+                best = videoInputs.find(d => /back|rear|environment|arrière/i.test(d.label));
+            }
+            return best;
         }
 
         async function startCamera() {
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                debug('❌ getUserMedia non disponible (HTTPS requis !)');
-                alert('La caméra nécessite HTTPS. Vérifie que ton URL commence par https://');
+                debug('❌ Caméra indisponible (HTTPS requis)');
+                alert('La caméra nécessite HTTPS.');
                 return;
             }
 
             try {
-                debug('Demande accès caméra...');
-                videoStream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-                    audio: false
-                });
+                debug('Recherche de la meilleure caméra arrière...');
+                const bestCam = await findBestBackCamera();
 
+                let constraints;
+                if (bestCam) {
+                    constraints = {
+                        video: { deviceId: { exact: bestCam.deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+                        audio: false
+                    };
+                    debug('📷 Utilise: ' + (bestCam.label || 'caméra arrière'));
+                } else {
+                    constraints = {
+                        video: { facingMode: { exact: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+                        audio: false
+                    };
+                    debug('📷 Fallback: caméra arrière générique');
+                }
+
+                videoStream = await navigator.mediaDevices.getUserMedia(constraints);
                 const video = document.getElementById('video');
                 video.srcObject = videoStream;
+                video.style.transform = 'none'; // pas de mirroir sur caméra arrière
                 await video.play();
+
+                // Essaye de forcer le zoom au minimum = angle le plus large possible
+                const track = videoStream.getVideoTracks()[0];
+                if (track.getCapabilities) {
+                    const caps = track.getCapabilities();
+                    if (caps.zoom) {
+                        try {
+                            await track.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] });
+                            debug(`🔍 Zoom réglé au minimum (${caps.zoom.min}) pour le plus grand angle`);
+                        } catch (e) {
+                            debug('⚠️ Impossible de régler le zoom: ' + e.message);
+                        }
+                    } else {
+                        debug('ℹ️ Cette caméra ne supporte pas le contrôle du zoom via le navigateur');
+                    }
+                }
 
                 cameraActive = true;
                 setStatus('cameraStatus', 'btnCam', true, '📷 ON');
-                debug('✅ Caméra active, résolution: ' + video.videoWidth + 'x' + video.videoHeight);
+                debug('✅ Caméra active: ' + video.videoWidth + 'x' + video.videoHeight);
+
+                initHandLandmarker();
             } catch (err) {
                 debug('❌ Erreur caméra: ' + err.name + ' - ' + err.message);
                 setStatus('cameraStatus', 'btnCam', false, '📷 ERR', true);
-                if (err.name === 'NotAllowedError') {
-                    alert('Permission caméra refusée. Va dans les réglages du navigateur pour l\'autoriser.');
-                }
             }
         }
 
@@ -294,12 +332,46 @@
             debug('Caméra: OFF');
         }
 
-        // ---------- HAND TRACKING (détection couleur de peau, sans librairie) ----------
-        function toggleHands() {
-            if (!cameraActive) {
-                alert('Active la caméra d\'abord !');
-                return;
+        // ---------- HAND SKELETON (MediaPipe HandLandmarker) ----------
+        async function initHandLandmarker() {
+            if (handLandmarkerReady) return;
+            try {
+                debug('Chargement du modèle de squelette de main...');
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+                );
+
+                try {
+                    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                        baseOptions: {
+                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                            delegate: "GPU"
+                        },
+                        runningMode: "VIDEO",
+                        numHands: 2
+                    });
+                } catch (gpuErr) {
+                    debug('⚠️ GPU indisponible, essai en CPU...');
+                    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                        baseOptions: {
+                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                            delegate: "CPU"
+                        },
+                        runningMode: "VIDEO",
+                        numHands: 2
+                    });
+                }
+
+                handLandmarkerReady = true;
+                debug('✅ Modèle de squelette chargé');
+            } catch (err) {
+                debug('❌ Erreur chargement modèle: ' + err.message);
             }
+        }
+
+        function toggleHands() {
+            if (!cameraActive) { alert('Active la caméra d\'abord !'); return; }
+            if (!handLandmarkerReady) { debug('⏳ Modèle encore en chargement, patiente...'); return; }
             if (!handsActive) startHands();
             else stopHands();
         }
@@ -307,7 +379,7 @@
         function startHands() {
             handsActive = true;
             setStatus('handsStatus', 'btnHands', true, '🖐️ ON');
-            debug('✅ Détection de mains: ON');
+            debug('✅ Squelette de main: ON');
             handLoop();
         }
 
@@ -317,74 +389,72 @@
             const ctx = document.getElementById('canvasHands').getContext('2d');
             ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
             setStatus('handsStatus', 'btnHands', false, '🖐️ 0');
-            debug('Détection de mains: OFF');
+            debug('Squelette de main: OFF');
         }
 
-        // Détection simple par couleur de peau (fonctionne sans dépendance externe)
-        let hiddenCanvas = document.createElement('canvas');
-        let hiddenCtx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
+        // Connexions du squelette (21 points par main, format MediaPipe)
+        const HAND_CONNECTIONS = [
+            [0,1],[1,2],[2,3],[3,4],       // pouce
+            [0,5],[5,6],[6,7],[7,8],       // index
+            [5,9],[9,10],[10,11],[11,12],  // majeur
+            [9,13],[13,14],[14,15],[15,16],// annulaire
+            [13,17],[17,18],[18,19],[19,20],// auriculaire
+            [0,17]                          // paume
+        ];
+
+        function mapPoint(nx, ny, video, canvas) {
+            // Convertit une coordonnée normalisée (0-1) en tenant compte du object-fit:cover
+            const vw = video.videoWidth, vh = video.videoHeight;
+            const cw = canvas.width, ch = canvas.height;
+            const videoRatio = vw / vh, canvasRatio = cw / ch;
+            let scale, offsetX = 0, offsetY = 0;
+
+            if (videoRatio > canvasRatio) {
+                scale = ch / vh;
+                offsetX = (vw * scale - cw) / 2;
+            } else {
+                scale = cw / vw;
+                offsetY = (vh * scale - ch) / 2;
+            }
+            return [nx * vw * scale - offsetX, ny * vh * scale - offsetY];
+        }
 
         function handLoop() {
             if (!handsActive) return;
 
             const video = document.getElementById('video');
-            const outCanvas = document.getElementById('canvasHands');
-            const outCtx = outCanvas.getContext('2d');
+            const canvas = document.getElementById('canvasHands');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            if (video.videoWidth > 0) {
-                const scale = 0.2; // basse résolution pour la performance
-                const w = Math.floor(video.videoWidth * scale);
-                const h = Math.floor(video.videoHeight * scale);
-                hiddenCanvas.width = w;
-                hiddenCanvas.height = h;
-                hiddenCtx.drawImage(video, 0, 0, w, h);
+            if (video.videoWidth > 0 && handLandmarker) {
+                const results = handLandmarker.detectForVideo(video, performance.now());
 
-                let imgData;
-                try {
-                    imgData = hiddenCtx.getImageData(0, 0, w, h);
-                } catch (e) {
-                    handLoopId = requestAnimationFrame(handLoop);
-                    return;
-                }
+                if (results.landmarks && results.landmarks.length > 0) {
+                    document.getElementById('handsStatus').textContent = `🖐️ ${results.landmarks.length}`;
 
-                const data = imgData.data;
-                let sumX = 0, sumY = 0, count = 0;
+                    results.landmarks.forEach(hand => {
+                        // Dessine les os
+                        ctx.strokeStyle = '#00ff00';
+                        ctx.lineWidth = 3;
+                        HAND_CONNECTIONS.forEach(([a, b]) => {
+                            const [ax, ay] = mapPoint(hand[a].x, hand[a].y, video, canvas);
+                            const [bx, by] = mapPoint(hand[b].x, hand[b].y, video, canvas);
+                            ctx.beginPath();
+                            ctx.moveTo(ax, ay);
+                            ctx.lineTo(bx, by);
+                            ctx.stroke();
+                        });
 
-                for (let y = 0; y < h; y++) {
-                    for (let x = 0; x < w; x++) {
-                        const i = (y * w + x) * 4;
-                        const r = data[i], g = data[i + 1], b = data[i + 2];
-                        // Détection basique de teinte peau
-                        if (r > 95 && g > 40 && b > 20 &&
-                            r > g && r > b &&
-                            Math.abs(r - g) > 15 &&
-                            (Math.max(r, g, b) - Math.min(r, g, b)) > 15) {
-                            sumX += x;
-                            sumY += y;
-                            count++;
-                        }
-                    }
-                }
-
-                outCtx.clearRect(0, 0, outCanvas.width, outCanvas.height);
-
-                if (count > (w * h * 0.03)) {
-                    const cx = (sumX / count / w) * outCanvas.width;
-                    const cy = (sumY / count / h) * outCanvas.height;
-                    // effet miroir car la vidéo est en scaleX(-1)
-                    const mirroredCx = outCanvas.width - cx;
-
-                    outCtx.beginPath();
-                    outCtx.arc(mirroredCx, cy, 40, 0, Math.PI * 2);
-                    outCtx.strokeStyle = '#00ff00';
-                    outCtx.lineWidth = 4;
-                    outCtx.stroke();
-
-                    outCtx.fillStyle = '#00ff00';
-                    outCtx.font = '16px monospace';
-                    outCtx.fillText('MAIN', mirroredCx - 20, cy - 50);
-
-                    document.getElementById('handsStatus').textContent = '🖐️ 1 détectée';
+                        // Dessine les articulations
+                        hand.forEach((point, idx) => {
+                            const [px, py] = mapPoint(point.x, point.y, video, canvas);
+                            ctx.beginPath();
+                            ctx.arc(px, py, idx === 0 ? 7 : 5, 0, Math.PI * 2);
+                            ctx.fillStyle = idx === 0 ? '#ff9900' : '#00ffff';
+                            ctx.fill();
+                        });
+                    });
                 } else {
                     document.getElementById('handsStatus').textContent = '🖐️ recherche...';
                 }
@@ -402,6 +472,11 @@
             if (btn) btn.classList.toggle('active', isOn);
         }
 
+        // Expose au HTML (onclick) car on est en type="module" (scope isolé)
+        window.toggleCamera = toggleCamera;
+        window.toggleHands = toggleHands;
+        window.toggleGyro = toggleGyro;
+
         // ---------- SERVICE WORKER ----------
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('sw.js')
@@ -413,7 +488,7 @@
         window.addEventListener('load', () => {
             debug('App démarrée. Protocole: ' + location.protocol);
             if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
-                debug('⚠️ ATTENTION: pas en HTTPS, la caméra va échouer !');
+                debug('⚠️ Pas en HTTPS, la caméra va échouer !');
             }
             initThree();
         });

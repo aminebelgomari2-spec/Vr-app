@@ -2,17 +2,12 @@
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
     <meta name="theme-color" content="#000000">
-    <meta name="description" content="VR Mobile App avec Hand Tracking">
     <link rel="manifest" href="manifest.json">
     <title>VR Mobile Hand Tracking</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
         html, body {
             width: 100%;
@@ -21,29 +16,38 @@
             color: #fff;
             font-family: Arial, sans-serif;
             overflow: hidden;
+            position: fixed;
         }
 
-        #container {
+        /* La vidéo de la caméra sert de fond, bien VISIBLE */
+        #video {
+            position: fixed;
+            top: 0;
+            left: 0;
             width: 100%;
             height: 100%;
-            display: flex;
+            object-fit: cover;
+            transform: scaleX(-1); /* effet miroir, plus naturel */
+            z-index: 1;
         }
 
-        #canvas {
-            flex: 1;
-            display: block;
-        }
-
-        #video {
-            display: none;
+        /* Le canvas 3D et le canvas de détection sont par-dessus, transparents */
+        #canvas3d, #canvasHands {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 2;
+            pointer-events: none;
         }
 
         .controls {
             position: fixed;
-            top: 10px;
+            top: env(safe-area-inset-top, 10px);
             left: 10px;
             z-index: 100;
-            background: rgba(0,0,0,0.8);
+            background: rgba(0,0,0,0.85);
             padding: 10px;
             border-radius: 8px;
             border: 2px solid #00ff00;
@@ -53,312 +57,365 @@
             background: #00ff00;
             color: #000;
             border: none;
-            padding: 8px 12px;
+            padding: 10px 14px;
             margin: 4px 2px;
             border-radius: 4px;
             cursor: pointer;
             font-weight: bold;
-            font-size: 12px;
+            font-size: 13px;
             display: block;
-            width: 100px;
+            width: 110px;
         }
 
-        .button:active {
-            background: #00aa00;
-        }
+        .button.active { background: #ff9900; }
+        .button:active { background: #00aa00; }
 
         .status {
             position: fixed;
-            top: 10px;
+            top: env(safe-area-inset-top, 10px);
             right: 10px;
-            background: rgba(0,0,0,0.8);
+            background: rgba(0,0,0,0.85);
             padding: 10px;
             border-radius: 8px;
             font-size: 12px;
             border: 2px solid #00ff00;
+            z-index: 100;
             max-width: 150px;
         }
 
-        .status div {
-            margin: 3px 0;
-        }
-
+        .status div { margin: 3px 0; }
         .ok { color: #0f0; }
         .error { color: #f00; }
         .warning { color: #ff0; }
 
-        .stats {
-            position: fixed;
-            bottom: 10px;
-            right: 10px;
-            background: rgba(0,0,0,0.8);
-            padding: 10px;
-            border-radius: 8px;
-            font-size: 11px;
-            font-family: monospace;
-            border: 2px solid #00ff00;
-        }
-
         .debug {
             position: fixed;
-            bottom: 10px;
+            bottom: env(safe-area-inset-bottom, 10px);
             left: 10px;
-            background: rgba(0,0,0,0.8);
+            right: 10px;
+            background: rgba(0,0,0,0.85);
             padding: 8px;
             border-radius: 8px;
             font-size: 10px;
             font-family: monospace;
-            max-width: 200px;
-            max-height: 100px;
+            max-height: 90px;
             overflow-y: auto;
             border: 1px solid #666;
+            z-index: 100;
         }
     </style>
 </head>
 <body>
-    <div id="container">
-        <video id="video" autoplay muted playsinline webkit-playsinline></video>
-        <canvas id="canvas"></canvas>
-    </div>
+    <video id="video" autoplay muted playsinline webkit-playsinline></video>
+    <canvas id="canvas3d"></canvas>
+    <canvas id="canvasHands"></canvas>
 
     <div class="controls">
-        <button class="button" onclick="toggleCamera()">📷 CAM</button>
-        <button class="button" onclick="toggleHands()">🖐️ MAIN</button>
-        <button class="button" onclick="toggleGyro()">🎯 GYRO</button>
+        <button class="button" id="btnCam" onclick="toggleCamera()">📷 CAM</button>
+        <button class="button" id="btnHands" onclick="toggleHands()">🖐️ MAIN</button>
+        <button class="button" id="btnGyro" onclick="toggleGyro()">🎯 GYRO</button>
     </div>
 
-    <div class="status" id="status">
+    <div class="status">
         <div id="cameraStatus" class="warning">📷 OFF</div>
         <div id="gyroStatus" class="warning">🎯 OFF</div>
         <div id="handsStatus" class="warning">🖐️ 0</div>
+        <div id="rotDisplay">X:0 Y:0</div>
     </div>
 
-    <div class="stats">
-        <div>RotX: <span id="rotX">0</span>°</div>
-        <div>RotY: <span id="rotY">0</span>°</div>
-        <div>Mains: <span id="handCount">0</span></div>
-    </div>
+    <div class="debug" id="debug">Chargement...</div>
 
-    <div class="debug" id="debug"></div>
-
-    <!-- Three.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
     <script>
-        let scene, camera, renderer;
+        let scene, camera3d, renderer;
         let cameraActive = false;
         let gyroActive = false;
         let handsActive = false;
         let rotationX = 0, rotationY = 0;
-        let detectedHands = 0;
         let videoStream = null;
+        let handLoopId = null;
 
         function debug(msg) {
-            const debugDiv = document.getElementById('debug');
+            const d = document.getElementById('debug');
             const time = new Date().toLocaleTimeString();
-            debugDiv.innerHTML = `[${time}] ${msg}<br>` + debugDiv.innerHTML.slice(0, 300);
+            d.innerHTML = `[${time}] ${msg}<br>` + d.innerHTML.slice(0, 500);
             console.log(msg);
         }
 
-        // Initialiser Three.js
+        // ---------- THREE.JS (les cubes 3D) ----------
         function initThree() {
-            const canvas = document.getElementById('canvas');
-            
+            const canvas = document.getElementById('canvas3d');
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x000000);
-            
-            camera = new THREE.PerspectiveCamera(
-                75, 
-                canvas.clientWidth / canvas.clientHeight, 
-                0.1, 
-                1000
-            );
-            camera.position.z = 5;
-            
-            renderer = new THREE.WebGLRenderer({ 
-                canvas: canvas, 
-                antialias: true, 
-                alpha: false 
-            });
-            renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+
+            camera3d = new THREE.PerspectiveCamera(75, w / h, 0.1, 1000);
+            camera3d.position.z = 5;
+
+            renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
+            renderer.setSize(w, h);
             renderer.setPixelRatio(window.devicePixelRatio);
 
-            // Ajouter des objets 3D
             const geometry = new THREE.BoxGeometry(1, 1, 1);
-            const material = new THREE.MeshPhongMaterial({ 
+            const material = new THREE.MeshPhongMaterial({
                 color: 0x00ff00,
                 emissive: 0x00ff00,
-                emissiveIntensity: 0.3
+                emissiveIntensity: 0.4,
+                transparent: true,
+                opacity: 0.85
             });
-            
+
             for (let i = 0; i < 5; i++) {
                 const cube = new THREE.Mesh(geometry, material);
                 cube.position.x = (i - 2) * 1.5;
-                cube.userData.originalRotation = { x: 0, y: 0 };
                 scene.add(cube);
             }
 
-            // Lumière
-            const light = new THREE.PointLight(0xffffff, 1);
+            const light = new THREE.PointLight(0xffffff, 1.2);
             light.position.set(5, 5, 5);
             scene.add(light);
+            scene.add(new THREE.AmbientLight(0x808080));
 
-            const ambientLight = new THREE.AmbientLight(0x404040);
-            scene.add(ambientLight);
-
-            window.addEventListener('resize', () => {
-                camera.aspect = canvas.clientWidth / canvas.clientHeight;
-                camera.updateProjectionMatrix();
-                renderer.setSize(canvas.clientWidth, canvas.clientHeight);
-            });
+            window.addEventListener('resize', onResize);
+            onResize();
 
             animate();
-            debug('Three.js initialisé');
+            debug('✅ Three.js prêt, ' + w + 'x' + h);
+        }
+
+        function onResize() {
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            camera3d.aspect = w / h;
+            camera3d.updateProjectionMatrix();
+            renderer.setSize(w, h);
+
+            const ch = document.getElementById('canvasHands');
+            ch.width = w;
+            ch.height = h;
         }
 
         function animate() {
             requestAnimationFrame(animate);
-
-            // Rotation des objets
             scene.children.forEach(obj => {
                 if (obj.isMesh) {
-                    obj.rotation.x += rotationX * 0.005;
-                    obj.rotation.y += rotationY * 0.005;
+                    obj.rotation.x += rotationX * 0.003;
+                    obj.rotation.y += rotationY * 0.003;
                 }
             });
-
-            renderer.render(scene, camera);
+            renderer.render(scene, camera3d);
         }
 
-        // Gyroscope
+        // ---------- GYROSCOPE ----------
         function toggleGyro() {
             if (!gyroActive) {
-                if (typeof DeviceOrientationEvent !== 'undefined') {
-                    window.addEventListener('deviceorientation', handleOrientation);
-                    gyroActive = true;
-                    document.getElementById('gyroStatus').className = 'ok';
-                    document.getElementById('gyroStatus').textContent = '🎯 ON';
-                    debug('Gyroscope: ON');
+                // iOS 13+ demande une permission explicite au clic du bouton
+                if (typeof DeviceOrientationEvent !== 'undefined' &&
+                    typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    DeviceOrientationEvent.requestPermission()
+                        .then(state => {
+                            if (state === 'granted') {
+                                enableGyro();
+                            } else {
+                                debug('❌ Permission gyroscope refusée');
+                            }
+                        })
+                        .catch(err => debug('❌ Erreur permission gyro: ' + err.message));
+                } else if (typeof DeviceOrientationEvent !== 'undefined') {
+                    enableGyro();
                 } else {
-                    debug('Gyroscope: Non supporté');
+                    debug('❌ Gyroscope non supporté sur cet appareil/navigateur');
                 }
             } else {
                 window.removeEventListener('deviceorientation', handleOrientation);
                 gyroActive = false;
-                document.getElementById('gyroStatus').className = 'warning';
-                document.getElementById('gyroStatus').textContent = '🎯 OFF';
+                setStatus('gyroStatus', 'btnGyro', false, '🎯 OFF');
                 debug('Gyroscope: OFF');
             }
+        }
+
+        function enableGyro() {
+            window.addEventListener('deviceorientation', handleOrientation);
+            gyroActive = true;
+            setStatus('gyroStatus', 'btnGyro', true, '🎯 ON');
+            debug('✅ Gyroscope: ON');
         }
 
         function handleOrientation(event) {
             rotationX = event.beta || 0;
             rotationY = event.gamma || 0;
-            document.getElementById('rotX').textContent = Math.round(rotationX);
-            document.getElementById('rotY').textContent = Math.round(rotationY);
+            document.getElementById('rotDisplay').textContent =
+                `X:${Math.round(rotationX)} Y:${Math.round(rotationY)}`;
         }
 
-        // Caméra
+        // ---------- CAMERA ----------
         function toggleCamera() {
-            if (!cameraActive) {
-                startCamera();
-            } else {
-                stopCamera();
-            }
+            if (!cameraActive) startCamera();
+            else stopCamera();
         }
 
         async function startCamera() {
-            try {
-                debug('Demande d\'accès à la caméra...');
-                
-                const constraints = {
-                    video: {
-                        facingMode: 'user',
-                        width: { ideal: 640 },
-                        height: { ideal: 480 }
-                    },
-                    audio: false
-                };
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                debug('❌ getUserMedia non disponible (HTTPS requis !)');
+                alert('La caméra nécessite HTTPS. Vérifie que ton URL commence par https://');
+                return;
+            }
 
-                videoStream = await navigator.mediaDevices.getUserMedia(constraints);
+            try {
+                debug('Demande accès caméra...');
+                videoStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+                    audio: false
+                });
+
                 const video = document.getElementById('video');
                 video.srcObject = videoStream;
-                
-                // Attendre que la vidéo soit chargée
-                video.onloadedmetadata = () => {
-                    video.play().catch(e => debug('Erreur play: ' + e.message));
-                };
+                await video.play();
 
                 cameraActive = true;
-                document.getElementById('cameraStatus').className = 'ok';
-                document.getElementById('cameraStatus').textContent = '📷 ON';
-                debug('Caméra: ON');
-                
+                setStatus('cameraStatus', 'btnCam', true, '📷 ON');
+                debug('✅ Caméra active, résolution: ' + video.videoWidth + 'x' + video.videoHeight);
             } catch (err) {
-                debug('Erreur: ' + err.message);
-                document.getElementById('cameraStatus').className = 'error';
-                document.getElementById('cameraStatus').textContent = '📷 ERR';
+                debug('❌ Erreur caméra: ' + err.name + ' - ' + err.message);
+                setStatus('cameraStatus', 'btnCam', false, '📷 ERR', true);
+                if (err.name === 'NotAllowedError') {
+                    alert('Permission caméra refusée. Va dans les réglages du navigateur pour l\'autoriser.');
+                }
             }
         }
 
         function stopCamera() {
-            if (videoStream) {
-                videoStream.getTracks().forEach(track => track.stop());
-            }
+            if (videoStream) videoStream.getTracks().forEach(t => t.stop());
             cameraActive = false;
-            handsActive = false;
-            document.getElementById('cameraStatus').className = 'warning';
-            document.getElementById('cameraStatus').textContent = '📷 OFF';
-            document.getElementById('handsStatus').className = 'warning';
-            document.getElementById('handsStatus').textContent = '🖐️ 0';
+            stopHands();
+            setStatus('cameraStatus', 'btnCam', false, '📷 OFF');
             debug('Caméra: OFF');
         }
 
-        // Hand Tracking simplifié
+        // ---------- HAND TRACKING (détection couleur de peau, sans librairie) ----------
         function toggleHands() {
             if (!cameraActive) {
-                debug('Active la caméra d\'abord !');
                 alert('Active la caméra d\'abord !');
                 return;
             }
-            
-            handsActive = !handsActive;
-            if (handsActive) {
-                document.getElementById('handsStatus').className = 'ok';
-                document.getElementById('handsStatus').textContent = '🖐️ 1';
-                debug('Hand Tracking: ON');
-            } else {
-                document.getElementById('handsStatus').className = 'warning';
-                document.getElementById('handsStatus').textContent = '🖐️ 0';
-                debug('Hand Tracking: OFF');
-            }
+            if (!handsActive) startHands();
+            else stopHands();
         }
 
-        // Service Worker
+        function startHands() {
+            handsActive = true;
+            setStatus('handsStatus', 'btnHands', true, '🖐️ ON');
+            debug('✅ Détection de mains: ON');
+            handLoop();
+        }
+
+        function stopHands() {
+            handsActive = false;
+            if (handLoopId) cancelAnimationFrame(handLoopId);
+            const ctx = document.getElementById('canvasHands').getContext('2d');
+            ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+            setStatus('handsStatus', 'btnHands', false, '🖐️ 0');
+            debug('Détection de mains: OFF');
+        }
+
+        // Détection simple par couleur de peau (fonctionne sans dépendance externe)
+        let hiddenCanvas = document.createElement('canvas');
+        let hiddenCtx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
+
+        function handLoop() {
+            if (!handsActive) return;
+
+            const video = document.getElementById('video');
+            const outCanvas = document.getElementById('canvasHands');
+            const outCtx = outCanvas.getContext('2d');
+
+            if (video.videoWidth > 0) {
+                const scale = 0.2; // basse résolution pour la performance
+                const w = Math.floor(video.videoWidth * scale);
+                const h = Math.floor(video.videoHeight * scale);
+                hiddenCanvas.width = w;
+                hiddenCanvas.height = h;
+                hiddenCtx.drawImage(video, 0, 0, w, h);
+
+                let imgData;
+                try {
+                    imgData = hiddenCtx.getImageData(0, 0, w, h);
+                } catch (e) {
+                    handLoopId = requestAnimationFrame(handLoop);
+                    return;
+                }
+
+                const data = imgData.data;
+                let sumX = 0, sumY = 0, count = 0;
+
+                for (let y = 0; y < h; y++) {
+                    for (let x = 0; x < w; x++) {
+                        const i = (y * w + x) * 4;
+                        const r = data[i], g = data[i + 1], b = data[i + 2];
+                        // Détection basique de teinte peau
+                        if (r > 95 && g > 40 && b > 20 &&
+                            r > g && r > b &&
+                            Math.abs(r - g) > 15 &&
+                            (Math.max(r, g, b) - Math.min(r, g, b)) > 15) {
+                            sumX += x;
+                            sumY += y;
+                            count++;
+                        }
+                    }
+                }
+
+                outCtx.clearRect(0, 0, outCanvas.width, outCanvas.height);
+
+                if (count > (w * h * 0.03)) {
+                    const cx = (sumX / count / w) * outCanvas.width;
+                    const cy = (sumY / count / h) * outCanvas.height;
+                    // effet miroir car la vidéo est en scaleX(-1)
+                    const mirroredCx = outCanvas.width - cx;
+
+                    outCtx.beginPath();
+                    outCtx.arc(mirroredCx, cy, 40, 0, Math.PI * 2);
+                    outCtx.strokeStyle = '#00ff00';
+                    outCtx.lineWidth = 4;
+                    outCtx.stroke();
+
+                    outCtx.fillStyle = '#00ff00';
+                    outCtx.font = '16px monospace';
+                    outCtx.fillText('MAIN', mirroredCx - 20, cy - 50);
+
+                    document.getElementById('handsStatus').textContent = '🖐️ 1 détectée';
+                } else {
+                    document.getElementById('handsStatus').textContent = '🖐️ recherche...';
+                }
+            }
+
+            handLoopId = requestAnimationFrame(handLoop);
+        }
+
+        // ---------- UTILITAIRE ----------
+        function setStatus(elId, btnId, isOn, text, isError) {
+            const el = document.getElementById(elId);
+            el.className = isError ? 'error' : (isOn ? 'ok' : 'warning');
+            el.textContent = text;
+            const btn = document.getElementById(btnId);
+            if (btn) btn.classList.toggle('active', isOn);
+        }
+
+        // ---------- SERVICE WORKER ----------
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('sw.js')
                 .then(() => debug('Service Worker: OK'))
-                .catch(err => debug('SW Error: ' + err.message));
+                .catch(err => debug('SW erreur (ignorable): ' + err.message));
         }
 
-        // Démarrage
+        // ---------- DEMARRAGE ----------
         window.addEventListener('load', () => {
-            debug('App démarrée');
-            initThree();
-        });
-
-        // Permissions
-        document.addEventListener('click', () => {
-            if (typeof DeviceOrientationEvent !== 'undefined' && 
-                typeof DeviceOrientationEvent.requestPermission === 'function') {
-                DeviceOrientationEvent.requestPermission()
-                    .then(permissionState => {
-                        if (permissionState === 'granted') {
-                            debug('Gyroscope permission: OK');
-                        }
-                    })
-                    .catch(console.error);
+            debug('App démarrée. Protocole: ' + location.protocol);
+            if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+                debug('⚠️ ATTENTION: pas en HTTPS, la caméra va échouer !');
             }
+            initThree();
         });
     </script>
 </body>

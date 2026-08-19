@@ -1,65 +1,42 @@
-const CACHE_NAME = 'vr-app-v1';
-const urlsToCache = [
-  '/',
-  '/index.html',
-  '/manifest.json'
-];
+const CACHE_NAME = 'vr-app-v2';
 
-// Installation
+// Installation - pas de pré-cache
 self.addEventListener('install', event => {
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then(cache => {
-        console.log('Cache ouvert');
-        return cache.addAll(urlsToCache);
-      })
-  );
+  self.skipWaiting();
+  console.log('Service Worker installé');
 });
 
 // Activation
 self.addEventListener('activate', event => {
-  event.waitUntil(
-    caches.keys().then(cacheNames => {
-      return Promise.all(
-        cacheNames.map(cacheName => {
-          if (cacheName !== CACHE_NAME) {
-            return caches.delete(cacheName);
-          }
-        })
-      );
-    })
-  );
+  event.waitUntil(self.clients.claim());
+  console.log('Service Worker activé');
 });
 
-// Fetch
+// Fetch - stratégie simple
 self.addEventListener('fetch', event => {
-  // Pour les CDN externes, pas de cache
-  if (event.request.url.includes('cdnjs') || 
-      event.request.url.includes('cdn.jsdelivr') ||
-      event.request.url.includes('googleapis')) {
+  // Ignorer les CDN externes
+  if (event.request.url.includes('cdnjs.cloudflare.com') || 
+      event.request.url.includes('cdn.jsdelivr.net')) {
     return;
   }
 
+  // Pour les fichiers locaux, essayer le cache puis le réseau
   event.respondWith(
-    caches.match(event.request)
+    fetch(event.request)
       .then(response => {
-        if (response) {
-          return response;
-        }
-        return fetch(event.request).then(response => {
-          if (!response || response.status !== 200 || response.type !== 'basic') {
-            return response;
-          }
+        // Cloner la réponse avant de la mettre en cache
+        if (response && response.status === 200) {
           const responseToCache = response.clone();
-          caches.open(CACHE_NAME)
-            .then(cache => {
-              cache.put(event.request, responseToCache);
-            });
-          return response;
-        });
+          caches.open(CACHE_NAME).then(cache => {
+            cache.put(event.request, responseToCache);
+          });
+        }
+        return response;
       })
       .catch(() => {
-        return caches.match('/index.html');
+        // Si le réseau échoue, chercher dans le cache
+        return caches.match(event.request)
+          .then(response => response || new Response('Offline'));
       })
   );
 });

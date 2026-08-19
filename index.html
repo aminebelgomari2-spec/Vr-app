@@ -279,13 +279,13 @@
                 let constraints;
                 if (bestCam) {
                     constraints = {
-                        video: { deviceId: { exact: bestCam.deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+                        video: { deviceId: { exact: bestCam.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
                         audio: false
                     };
                     debug('📷 Utilise: ' + (bestCam.label || 'caméra arrière'));
                 } else {
                     constraints = {
-                        video: { facingMode: { exact: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+                        video: { facingMode: { exact: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
                         audio: false
                     };
                     debug('📷 Fallback: caméra arrière générique');
@@ -341,26 +341,16 @@
                     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
                 );
 
-                try {
-                    handLandmarker = await HandLandmarker.createFromOptions(vision, {
-                        baseOptions: {
-                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-                            delegate: "GPU"
-                        },
-                        runningMode: "VIDEO",
-                        numHands: 2
-                    });
-                } catch (gpuErr) {
-                    debug('⚠️ GPU indisponible, essai en CPU...');
-                    handLandmarker = await HandLandmarker.createFromOptions(vision, {
-                        baseOptions: {
-                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-                            delegate: "CPU"
-                        },
-                        runningMode: "VIDEO",
-                        numHands: 2
-                    });
-                }
+                // CPU est plus lent mais BEAUCOUP plus stable sur mobile.
+                // Le delegate GPU fait crasher beaucoup de téléphones Android/iOS avec cette librairie.
+                handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                        delegate: "CPU"
+                    },
+                    runningMode: "VIDEO",
+                    numHands: 1
+                });
 
                 handLandmarkerReady = true;
                 debug('✅ Modèle de squelette chargé');
@@ -419,8 +409,17 @@
             return [nx * vw * scale - offsetX, ny * vh * scale - offsetY];
         }
 
+        let frameCounter = 0;
+
         function handLoop() {
             if (!handsActive) return;
+
+            frameCounter++;
+            // Ne traite qu'1 frame sur 3 pour économiser la mémoire/CPU et éviter le crash
+            if (frameCounter % 3 !== 0) {
+                handLoopId = requestAnimationFrame(handLoop);
+                return;
+            }
 
             const video = document.getElementById('video');
             const canvas = document.getElementById('canvasHands');
@@ -428,6 +427,7 @@
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
             if (video.videoWidth > 0 && handLandmarker) {
+              try {
                 const results = handLandmarker.detectForVideo(video, performance.now());
 
                 if (results.landmarks && results.landmarks.length > 0) {
@@ -458,6 +458,9 @@
                 } else {
                     document.getElementById('handsStatus').textContent = '🖐️ recherche...';
                 }
+              } catch (err) {
+                debug('⚠️ Erreur détection (ignorée): ' + err.message);
+              }
             }
 
             handLoopId = requestAnimationFrame(handLoop);
@@ -484,14 +487,23 @@
                 .catch(err => debug('SW erreur (ignorable): ' + err.message));
         }
 
+        // ---------- DETECTION DE CRASH ----------
+        window.addEventListener('error', (e) => {
+            debug('💥 ERREUR: ' + e.message + ' (' + (e.filename || '').split('/').pop() + ':' + e.lineno + ')');
+        });
+        window.addEventListener('unhandledrejection', (e) => {
+            debug('💥 PROMESSE REJETÉE: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
+        });
+        document.getElementById('canvas3d').addEventListener('webglcontextlost', (e) => {
+            e.preventDefault();
+            debug('💥 Contexte WebGL perdu (mémoire saturée) — recharge la page');
+            alert('Le rendu 3D a planté (manque de mémoire). Recharge la page et réessaye avec la caméra normale (pas ultra grand-angle) si ça persiste.');
+        });
+        document.getElementById('video').addEventListener('error', (e) => {
+            debug('💥 Erreur vidéo: ' + e.message);
+        });
+
         // ---------- DEMARRAGE ----------
         window.addEventListener('load', () => {
             debug('App démarrée. Protocole: ' + location.protocol);
-            if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
-                debug('⚠️ Pas en HTTPS, la caméra va échouer !');
-            }
-            initThree();
-        });
-    </script>
-</body>
-</html>
+        
